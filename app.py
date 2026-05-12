@@ -24,22 +24,17 @@ import pandas as pd
 import numpy as np
 import warnings
 import time
-import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-# ── Auto-install yfinance if missing (Streamlit Cloud safety net) ────────────
-# Handles the case where requirements.txt was not committed to the repo.
+# ── yfinance import with graceful fallback ───────────────────────────────────
+# If yfinance is missing (requirements.txt not committed to repo),
+# the app falls back to clearly-labelled mock data instead of crashing.
 try:
     import yfinance as yf
+    YFINANCE_AVAILABLE = True
 except ModuleNotFoundError:
-    st.info("⚙️ Installing yfinance for the first time — please wait ~15 seconds…")
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "yfinance>=0.2.40", "-q"]
-    )
-    import yfinance as yf
-    st.rerun()   # restart so all imports are clean
+    YFINANCE_AVAILABLE = False
 
 warnings.filterwarnings("ignore")
 
@@ -148,6 +143,37 @@ h2, h3 { color: #1F6FEB !important;
 </style>
 """, unsafe_allow_html=True)
 
+
+
+# =============================================================================
+#  MOCK DATA GENERATOR  (fallback when yfinance is unavailable)
+# =============================================================================
+
+def generate_mock_universe(symbols: list) -> pd.DataFrame:
+    """
+    Deterministic mock NSE F&O snapshot used as a fallback when
+    yfinance cannot be imported (e.g. requirements.txt not committed).
+    """
+    rng = np.random.default_rng(42)
+    n   = len(symbols)
+    cmp        = rng.uniform(200, 4000, n).round(2)
+    prev_close = (cmp * rng.uniform(0.95, 1.05, n)).round(2)
+    vwap       = (cmp * rng.uniform(0.98, 1.02, n)).round(2)
+    oi         = rng.integers(500_000, 50_000_000, n)
+    oi_change  = rng.normal(0.0, 8.0, n).round(2)
+    volume     = rng.integers(200_000, 5_000_000, n)
+    avg_volume = (volume * rng.uniform(0.6, 1.4, n)).astype(int)
+    iv         = rng.uniform(10, 80, n).round(2)
+    pcr        = rng.uniform(0.4, 2.5, n).round(2)
+    atr        = (cmp * rng.uniform(0.01, 0.04, n)).round(2)
+    support    = (cmp * rng.uniform(0.90, 0.96, n)).round(2)
+    resistance = (cmp * rng.uniform(1.08, 1.22, n)).round(2)
+    return pd.DataFrame({
+        "Symbol": symbols, "CMP": cmp, "Prev_Close": prev_close,
+        "VWAP": vwap, "Volume": volume, "Avg_Volume": avg_volume,
+        "ATR": atr, "OI": oi, "OI_Change_Pct": oi_change,
+        "PCR": pcr, "IV": iv, "Support": support, "Resistance": resistance,
+    })
 
 # =============================================================================
 #  SYMBOL UNIVERSE  — Top 20 NSE F&O stocks by liquidity
@@ -531,13 +557,28 @@ st.divider()
 data_placeholder  = st.empty()
 progress_placeholder = st.empty()
 
+# ── Show banner if yfinance is missing ───────────────────────────────────────
+if not YFINANCE_AVAILABLE:
+    st.error(
+        "**⚠️ `yfinance` package not found.**\n\n"
+        "**Fix (30 seconds):**\n"
+        "1. Make sure `requirements.txt` is in the **root** of your GitHub repo\n"
+        "2. Go to Streamlit Cloud → **Manage App → Reboot app**\n\n"
+        "Showing **mock/demo data** below until the package is available.",
+        icon="📦",
+    )
+
 try:
     with data_placeholder.container():
-        with st.spinner("⏳ Fetching live NSE data via yfinance… (first load ~30s, then cached 5 min)"):
-            raw_df = get_cached_universe(
-                symbols_tuple = tuple(FO_SYMBOLS),
-                _cache_key    = st.session_state["cache_key"],
-            )
+        if YFINANCE_AVAILABLE:
+            with st.spinner("⏳ Fetching live NSE data via yfinance… (first load ~30–60s, then cached 5 min)"):
+                raw_df = get_cached_universe(
+                    symbols_tuple = tuple(FO_SYMBOLS),
+                    _cache_key    = st.session_state["cache_key"],
+                )
+        else:
+            # Graceful fallback — show mock data, no crash
+            raw_df = generate_mock_universe(FO_SYMBOLS)
 
     data_placeholder.empty()
 
@@ -554,11 +595,11 @@ except Exception as exc:
     data_placeholder.empty()
     st.error(
         f"**Live data fetch failed:** {exc}\n\n"
-        "Possible causes:\n"
+        "**Possible causes:**\n"
         "- No internet connection\n"
-        "- yfinance/Yahoo Finance temporarily unavailable\n"
+        "- Yahoo Finance temporarily unavailable\n"
         "- Market closed (options data unavailable outside hours)\n\n"
-        "👉 Click **Refresh Live Data** in the sidebar to retry."
+        "👉 Click **🔄 Refresh Live Data** in the sidebar to retry."
     )
     st.stop()
 
