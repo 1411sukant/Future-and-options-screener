@@ -1,7 +1,9 @@
-# F&O High-Probability Screener — Python Dependencies
-# Install with: pip install -r requirements.txt
-# Requires Python 3.8+
-
+# F&O Live Screener — Python Dependencies
+# Install: pip install -r requirements.txt
+# Python : 3.9+
+ 
 streamlit>=1.32.0
 pandas>=2.0.0
 numpy>=1.26.0
+yfinance>=0.2.40
+requests>=2.28.0
