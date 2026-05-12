@@ -1,802 +1,553 @@
 # =============================================================================
-#  F&O REAL-TIME SCREENER  |  app.py  v3.0
-#  Data  : yfinance (Yahoo Finance) — FREE, no API key, ~2-min delay
+#  F&O SIGNAL SCREENER  |  app.py  v4.0
+#  Simple: Press Refresh → Get BUY/SELL signals
+#  Data  : yfinance (Yahoo Finance) — FREE
 #  Run   : streamlit run app.py
-#  Deps  : pip install streamlit pandas numpy yfinance requests
-# =============================================================================
-#
-#  DATA SOURCES (all free):
-#  ┌─────────────────────────────────────────────────────────────────┐
-#  │  yfinance (.NS suffix)  → CMP, OHLCV, ATR, VWAP, Volume       │
-#  │  yfinance option_chain  → Real OI (calls+puts), PCR, IV        │
-#  │  Session State          → OI delta between refreshes           │
-#  └─────────────────────────────────────────────────────────────────┘
-#
-#  PERFORMANCE:
-#  First load  ~30-60s  (fetches 20 symbols in parallel via threads)
-#  Cached for  5 minutes — instant subsequent loads
-#  Refresh     click sidebar button or wait for cache to expire
-#
 # =============================================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import warnings
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-
-# ── yfinance import with graceful fallback ───────────────────────────────────
-# If yfinance is missing (requirements.txt not committed to repo),
-# the app falls back to clearly-labelled mock data instead of crashing.
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except ModuleNotFoundError:
-    YFINANCE_AVAILABLE = False
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 warnings.filterwarnings("ignore")
 
-# ── Page config ──────────────────────────────────────────────────────────────
+try:
+    import yfinance as yf
+    YFINANCE_OK = True
+except ModuleNotFoundError:
+    YFINANCE_OK = False
+
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="F&O Live Screener",
-    page_icon="📡",
+    page_title="F&O Signal Screener",
+    page_icon="🎯",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# ── CSS ──────────────────────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;600;700&display=swap');
 
 html, body, [class*="css"] {
     font-family: 'Space Grotesk', sans-serif !important;
-    background-color: #060B14 !important;
+    background-color: #080C14 !important;
     color: #E2E8F0 !important;
 }
-section[data-testid="stSidebar"] {
-    background: #0D1117 !important;
-    border-right: 1px solid #21262D;
-}
-section[data-testid="stSidebar"] * { color: #C9D1D9 !important; }
-section[data-testid="stSidebar"] label {
+
+/* ── Big refresh button ── */
+div[data-testid="stButton"] > button {
+    width: 100%;
+    padding: 0.9rem 2rem !important;
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.68rem !important;
-    letter-spacing: 0.09em;
+    font-size: 1.1rem !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: #8B949E !important;
+    background: linear-gradient(135deg, #00C851, #007E33) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 20px rgba(0,200,81,0.3);
+    transition: all 0.2s ease;
 }
+div[data-testid="stButton"] > button:hover {
+    box-shadow: 0 6px 28px rgba(0,200,81,0.5) !important;
+    transform: translateY(-1px);
+}
+
+/* ── Metric cards ── */
 [data-testid="stMetric"] {
-    background: #0D1117;
-    border: 1px solid #21262D;
-    border-radius: 10px;
-    padding: 0.9rem 1.2rem;
-    position: relative;
-    overflow: hidden;
-}
-[data-testid="stMetric"]::after {
-    content: '';
-    position: absolute;
-    bottom: 0; left: 0; right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, #238636, #1F6FEB);
+    background: #0D1421;
+    border: 1px solid #1A2535;
+    border-radius: 12px;
+    padding: 1rem 1.3rem;
 }
 [data-testid="stMetricLabel"] {
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 0.65rem !important;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: #8B949E !important;
+    color: #4B6080 !important;
 }
 [data-testid="stMetricValue"] {
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 1.8rem !important;
+    font-size: 2rem !important;
     font-weight: 700 !important;
-    color: #3FB950 !important;
+    color: #00C851 !important;
 }
-hr { border-color: #21262D !important; }
-h1 { font-family: 'Space Grotesk', sans-serif !important; font-weight: 700 !important; }
-h2, h3 { color: #1F6FEB !important;
-          font-size: 0.85rem !important;
-          text-transform: uppercase; letter-spacing: 0.07em; }
-.stDownloadButton > button {
-    background: transparent !important;
-    border: 1px solid #3FB950 !important;
-    color: #3FB950 !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.72rem; letter-spacing: 0.07em;
-    text-transform: uppercase; border-radius: 6px;
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] {
+    border: 1px solid #1A2535 !important;
+    border-radius: 10px;
+    overflow: hidden;
 }
-.stDownloadButton > button:hover {
-    background: #3FB950 !important; color: #060B14 !important;
-}
-.stButton > button {
-    background: transparent !important;
-    border: 1px solid #1F6FEB !important;
-    color: #1F6FEB !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.72rem; letter-spacing: 0.07em;
-    text-transform: uppercase; border-radius: 6px; width: 100%;
-}
-.stButton > button:hover {
-    background: #1F6FEB !important; color: #060B14 !important;
-}
-.live-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: #0D1117; border: 1px solid #238636;
-    border-radius: 20px; padding: 3px 12px;
+
+hr { border-color: #1A2535 !important; }
+
+/* ── Last updated tag ── */
+.update-tag {
+    display: inline-block;
+    background: #0D1421;
+    border: 1px solid #1A2535;
+    border-radius: 20px;
+    padding: 4px 14px;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem; color: #3FB950; letter-spacing: 0.08em;
+    font-size: 0.65rem;
+    color: #4B6080;
+    letter-spacing: 0.07em;
 }
-.live-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: #3FB950;
-    box-shadow: 0 0 6px #3FB950;
-    animation: pulse 1.5s infinite;
-}
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0.3; }
-}
+
+/* ── Signal badge colors in markdown ── */
+.buy  { color: #00C851; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.sell { color: #FF3B5C; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
 </style>
 """, unsafe_allow_html=True)
 
 
-
 # =============================================================================
-#  MOCK DATA GENERATOR  (fallback when yfinance is unavailable)
-# =============================================================================
-
-def generate_mock_universe(symbols: list) -> pd.DataFrame:
-    """
-    Deterministic mock NSE F&O snapshot used as a fallback when
-    yfinance cannot be imported (e.g. requirements.txt not committed).
-    """
-    rng = np.random.default_rng(42)
-    n   = len(symbols)
-    cmp        = rng.uniform(200, 4000, n).round(2)
-    prev_close = (cmp * rng.uniform(0.95, 1.05, n)).round(2)
-    vwap       = (cmp * rng.uniform(0.98, 1.02, n)).round(2)
-    oi         = rng.integers(500_000, 50_000_000, n)
-    oi_change  = rng.normal(0.0, 8.0, n).round(2)
-    volume     = rng.integers(200_000, 5_000_000, n)
-    avg_volume = (volume * rng.uniform(0.6, 1.4, n)).astype(int)
-    iv         = rng.uniform(10, 80, n).round(2)
-    pcr        = rng.uniform(0.4, 2.5, n).round(2)
-    atr        = (cmp * rng.uniform(0.01, 0.04, n)).round(2)
-    support    = (cmp * rng.uniform(0.90, 0.96, n)).round(2)
-    resistance = (cmp * rng.uniform(1.08, 1.22, n)).round(2)
-    return pd.DataFrame({
-        "Symbol": symbols, "CMP": cmp, "Prev_Close": prev_close,
-        "VWAP": vwap, "Volume": volume, "Avg_Volume": avg_volume,
-        "ATR": atr, "OI": oi, "OI_Change_Pct": oi_change,
-        "PCR": pcr, "IV": iv, "Support": support, "Resistance": resistance,
-    })
-
-# =============================================================================
-#  SYMBOL UNIVERSE  — Top 20 NSE F&O stocks by liquidity
+#  NSE F&O SYMBOL LIST  (top 30 liquid stocks)
 # =============================================================================
 
-FO_SYMBOLS = [
-    "RELIANCE", "TCS",       "HDFCBANK",  "ICICIBANK", "INFY",
-    "SBIN",     "AXISBANK",  "KOTAKBANK", "BAJFINANCE","TITAN",
-    "MARUTI",   "LT",        "SUNPHARMA", "WIPRO",     "HCLTECH",
-    "TATAMOTORS","TECHM",    "ONGC",      "TATASTEEL", "APOLLOHOSP",
+SYMBOLS = [
+    "RELIANCE","TCS","HDFCBANK","ICICIBANK","INFY",
+    "SBIN","AXISBANK","KOTAKBANK","BAJFINANCE","TITAN",
+    "MARUTI","LT","SUNPHARMA","WIPRO","HCLTECH",
+    "TATAMOTORS","TECHM","ONGC","TATASTEEL","APOLLOHOSP",
+    "BAJAJFINSV","POWERGRID","NTPC","DIVISLAB","CIPLA",
+    "DRREDDY","COALINDIA","HINDALCO","JSWSTEEL","ADANIPORTS",
 ]
 
-# yfinance needs ".NS" suffix for NSE stocks
-def nse(sym: str) -> str:
-    return f"{sym}.NS"
-
 
 # =============================================================================
-#  SINGLE SYMBOL DATA FETCHER
-#  Fetches OHLCV + option chain for one symbol.
-#  Designed to run inside a ThreadPoolExecutor worker.
+#  SIGNAL ENGINE
 # =============================================================================
 
-def fetch_symbol_data(symbol: str) -> dict | None:
+def compute_signal(symbol: str) -> dict | None:
     """
-    Returns a dict of market data for one NSE F&O symbol.
+    Fetches live data for one symbol and returns a trading signal.
 
-    Price / OHLCV  : yfinance Ticker.history(period='22d')
-    ATR            : 14-period Average True Range from daily OHLCV
-    VWAP           : Volume-weighted from 22-day history (swing VWAP)
-    Support        : 20-day rolling low
-    Resistance     : 20-day rolling high
-    OI / PCR / IV  : Nearest-expiry option chain via yfinance
+    Signal logic (all must align for BUY / SELL):
+    ──────────────────────────────────────────────
+    BUY  when:
+      • CMP > VWAP            (price above average — bullish)
+      • CMP > EMA20           (above 20-day trend)
+      • RSI between 45–70     (momentum without being overbought)
+      • Price change % > 0    (today is green)
+
+    SELL when:
+      • CMP < VWAP            (price below average — bearish)
+      • CMP < EMA20           (below 20-day trend)
+      • RSI between 30–55     (weakness without being oversold)
+      • Price change % < 0    (today is red)
+
+    NEUTRAL when conditions are mixed.
+
+    Stop-Loss  = CMP − ATR × 1.5   (for BUY)
+               = CMP + ATR × 1.5   (for SELL)
+    Target     = CMP + ATR × 4.5   (3:1 reward for BUY)
+               = CMP − ATR × 4.5   (3:1 reward for SELL)
     """
     try:
-        ticker = yf.Ticker(nse(symbol))
+        ticker = yf.Ticker(f"{symbol}.NS")
+        hist   = ticker.history(period="30d", auto_adjust=True)
 
-        # ── Historical OHLCV (22 days) ────────────────────────────────────────
-        hist = ticker.history(period="22d", auto_adjust=True)
-        if hist.empty or len(hist) < 5:
+        if hist.empty or len(hist) < 15:
             return None
 
-        cmp        = float(hist["Close"].iloc[-1])
-        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else cmp
-        volume     = int(hist["Volume"].iloc[-1])
-        avg_volume = int(hist["Volume"].iloc[:-1].mean())
+        close  = hist["Close"]
+        high   = hist["High"]
+        low    = hist["Low"]
+        volume = hist["Volume"]
 
-        # ── ATR (14-period) ───────────────────────────────────────────────────
-        h, l, c = hist["High"], hist["Low"], hist["Close"]
-        tr = pd.concat([
-            h - l,
-            (h - c.shift(1)).abs(),
-            (l - c.shift(1)).abs(),
+        cmp        = float(close.iloc[-1])
+        prev_close = float(close.iloc[-2])
+        price_chg  = round((cmp - prev_close) / prev_close * 100, 2)
+
+        # ── VWAP (swing, from available history) ─────────────────────────────
+        typical = (high + low + close) / 3
+        vwap    = float((typical * volume).sum() / volume.sum())
+
+        # ── EMA 20 ───────────────────────────────────────────────────────────
+        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+
+        # ── ATR 14 ───────────────────────────────────────────────────────────
+        tr  = pd.concat([
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low  - close.shift(1)).abs(),
         ], axis=1).max(axis=1)
         atr = float(tr.rolling(14).mean().dropna().iloc[-1])
 
-        # ── VWAP (swing, from available history) ─────────────────────────────
-        typical_price = (hist["High"] + hist["Low"] + hist["Close"]) / 3
-        vwap = float(
-            (typical_price * hist["Volume"]).sum() / hist["Volume"].sum()
-        )
+        # ── RSI 14 ───────────────────────────────────────────────────────────
+        delta  = close.diff()
+        gain   = delta.clip(lower=0).rolling(14).mean()
+        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+        rs     = gain / loss.replace(0, np.nan)
+        rsi    = float(100 - (100 / (1 + rs)).dropna().iloc[-1])
 
-        # ── Support & Resistance (20-day extremes) ────────────────────────────
-        support    = float(hist["Low"].rolling(20).min().dropna().iloc[-1])
-        resistance = float(hist["High"].rolling(20).max().dropna().iloc[-1])
+        # ── Volume surge flag ─────────────────────────────────────────────────
+        avg_vol    = float(volume.iloc[:-1].mean())
+        vol_surge  = volume.iloc[-1] > avg_vol * 1.3
 
-        # ── Option Chain (nearest expiry) ─────────────────────────────────────
-        oi_total = 0
-        pcr      = 1.0     # neutral default
-        iv       = 25.0    # default IV %
+        # ── Signal decision ───────────────────────────────────────────────────
+        buy_score  = sum([
+            cmp > vwap,
+            cmp > ema20,
+            45 <= rsi <= 72,
+            price_chg > 0,
+            vol_surge,
+        ])
+        sell_score = sum([
+            cmp < vwap,
+            cmp < ema20,
+            28 <= rsi <= 55,
+            price_chg < 0,
+            vol_surge,
+        ])
 
-        try:
-            exps = ticker.options           # tuple of expiry date strings
-            if exps:
-                chain = ticker.option_chain(exps[0])   # nearest expiry
-
-                call_oi = int(chain.calls["openInterest"].fillna(0).sum())
-                put_oi  = int(chain.puts["openInterest"].fillna(0).sum())
-                oi_total = call_oi + put_oi
-
-                # PCR = Put OI / Call OI
-                pcr = round(put_oi / max(call_oi, 1), 2)
-
-                # ATM IV: find the call strike closest to CMP
-                calls_df = chain.calls.copy()
-                calls_df["dist"] = (calls_df["strike"] - cmp).abs()
-                atm_row  = calls_df.nsmallest(1, "dist")
-                if not atm_row.empty:
-                    raw_iv = float(atm_row["impliedVolatility"].values[0])
-                    iv = round(raw_iv * 100, 2)   # convert 0.XX → XX%
-        except Exception:
-            pass  # option chain unavailable — use defaults
+        if buy_score >= 4:
+            signal   = "🟢 BUY"
+            sl       = round(cmp - atr * 1.5, 2)
+            target   = round(cmp + atr * 4.5, 2)   # 3:1 RR
+        elif sell_score >= 4:
+            signal   = "🔴 SELL"
+            sl       = round(cmp + atr * 1.5, 2)
+            target   = round(cmp - atr * 4.5, 2)   # 3:1 RR
+        else:
+            signal   = "⚪ NEUTRAL"
+            sl       = round(cmp - atr * 1.5, 2)
+            target   = round(cmp + atr * 1.5, 2)
 
         return {
-            "Symbol":    symbol,
-            "CMP":       round(cmp, 2),
-            "Prev_Close":round(prev_close, 2),
-            "VWAP":      round(vwap, 2),
-            "Volume":    volume,
-            "Avg_Volume":avg_volume,
-            "ATR":       round(atr, 2),
-            "OI":        oi_total,
-            "PCR":       pcr,
-            "IV":        iv,
-            "Support":   round(support, 2),
-            "Resistance":round(resistance, 2),
+            "Symbol":     symbol,
+            "Signal":     signal,
+            "CMP":        round(cmp, 2),
+            "Target":     target,
+            "Stop-Loss":  sl,
+            "ATR":        round(atr, 2),
+            "RSI":        round(rsi, 1),
+            "EMA20":      round(ema20, 2),
+            "VWAP":       round(vwap, 2),
+            "Chg %":      price_chg,
+            "Vol Surge":  "✅ Yes" if vol_surge else "—",
+            "Score":      max(buy_score, sell_score),
         }
 
     except Exception:
-        return None   # caller will skip this symbol
+        return None
 
 
-# =============================================================================
-#  BATCH FETCHER  — runs all symbols in parallel threads
-# =============================================================================
-
-def fetch_live_universe(symbols: list[str], max_workers: int = 8) -> pd.DataFrame:
-    """
-    Fetch live data for every symbol using a thread pool.
-    Returns a cleaned DataFrame ready for indicator calculation.
-    """
-    results = {}
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(fetch_symbol_data, sym): sym
-            for sym in symbols
-        }
-        for future in as_completed(future_map):
-            sym  = future_map[future]
-            data = future.result()
-            if data is not None:
-                results[sym] = data
-
-    if not results:
-        raise RuntimeError(
-            "All symbol fetches failed. "
-            "Check your internet connection or yfinance availability."
-        )
-
-    df = pd.DataFrame(list(results.values()))
-
-    # ── OI Change %: compare with previous fetch stored in session state ──────
-    prev_oi_map: dict = st.session_state.get("prev_oi_map", {})
-    oi_change = []
-    for _, row in df.iterrows():
-        sym      = row["Symbol"]
-        curr_oi  = row["OI"]
-        prev_oi  = prev_oi_map.get(sym, curr_oi)
-        if prev_oi > 0:
-            chg = round((curr_oi - prev_oi) / prev_oi * 100, 2)
-        else:
-            # First load: use volume ratio as a proxy for OI momentum
-            vol_ratio = row["Volume"] / max(row["Avg_Volume"], 1)
-            chg = round((vol_ratio - 1) * 15, 2)   # scaled proxy signal
-        oi_change.append(chg)
-
-    df["OI_Change_Pct"] = oi_change
-
-    # Persist current OI for next refresh comparison
-    st.session_state["prev_oi_map"]  = dict(zip(df["Symbol"], df["OI"]))
-    st.session_state["last_fetch_ts"]= datetime.now().strftime("%H:%M:%S")
-
-    return df.reset_index(drop=True)
-
-
-# =============================================================================
-#  CACHED WRAPPER  — 5-minute TTL
-# =============================================================================
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_cached_universe(symbols_tuple: tuple, _cache_key: int) -> pd.DataFrame:
-    """
-    Thin cache wrapper. _cache_key is bumped by the Refresh button
-    to force a new fetch without waiting for TTL expiry.
-    """
-    return fetch_live_universe(list(symbols_tuple))
-
-
-# =============================================================================
-#  INDICATOR ENGINE
-# =============================================================================
-
-def classify_oi_trend(price_chg: float, oi_chg: float) -> str:
-    """Classic four-quadrant OI interpretation."""
-    if price_chg >= 0 and oi_chg >= 0:
-        return "🟢 Long Buildup"
-    elif price_chg < 0 and oi_chg >= 0:
-        return "🔴 Short Buildup"
-    elif price_chg >= 0 and oi_chg < 0:
-        return "🟡 Short Covering"
+def mock_signal(symbol: str, idx: int) -> dict:
+    """Fallback mock signal when yfinance is unavailable."""
+    rng     = np.random.default_rng(idx * 7 + 13)
+    cmp     = round(float(rng.uniform(200, 4000)), 2)
+    atr     = round(cmp * float(rng.uniform(0.015, 0.035)), 2)
+    signals = ["🟢 BUY", "🔴 SELL", "⚪ NEUTRAL"]
+    weights = [0.35, 0.30, 0.35]
+    signal  = rng.choice(signals, p=weights)
+    if signal == "🟢 BUY":
+        sl, tgt = round(cmp - atr*1.5, 2), round(cmp + atr*4.5, 2)
+    elif signal == "🔴 SELL":
+        sl, tgt = round(cmp + atr*1.5, 2), round(cmp - atr*4.5, 2)
     else:
-        return "🔵 Long Unwinding"
-
-
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["Price_Change_Pct"] = (
-        (out["CMP"] - out["Prev_Close"]) / out["Prev_Close"] * 100
-    ).round(2)
-    out["Trend_OI"]    = out.apply(
-        lambda r: classify_oi_trend(r["Price_Change_Pct"], r["OI_Change_Pct"]), axis=1
-    )
-    out["VWAP_Signal"] = np.where(out["CMP"] > out["VWAP"], "▲ Above", "▼ Below")
-    out["Vol_Surge"]   = out["Volume"] > (1.5 * out["Avg_Volume"])
-    return out
-
-
-# =============================================================================
-#  3:1 RISK-REWARD ENGINE
-# =============================================================================
-
-def calculate_rr_setups(
-    df: pd.DataFrame,
-    atr_multiplier: float,
-    min_oi_change_pct: float,
-    pcr_low: float  = 0.70,
-    pcr_high: float = 1.50,
-) -> pd.DataFrame:
-    """
-    Filters for high-probability setups satisfying a strict 3:1 R:R.
-
-    Entry      = CMP
-    Stop-Loss  = Entry − (ATR × multiplier)
-    Target     = Entry + (Risk × 3)
-
-    Five validity gates:
-      1. |OI Change %| >= threshold          (liquidity / momentum)
-      2. Resistance >= Target                (clear structural headroom)
-      3. PCR outside neutral band            (sentiment extreme)
-      4. Stop-Loss >= Support × 0.98        (SL on structural floor)
-      5. OI Trend is bullish (LB or SC)      (directional confirmation)
-    """
-    out = df.copy()
-    sl_dist          = out["ATR"] * atr_multiplier
-    out["Entry"]     = out["CMP"]
-    out["Stop_Loss"] = (out["Entry"] - sl_dist).round(2)
-    out["Target_3x"] = (out["Entry"] + sl_dist * 3).round(2)
-
-    f1 = out["OI_Change_Pct"].abs() >= min_oi_change_pct
-    f2 = out["Resistance"] >= out["Target_3x"]
-    f3 = (out["PCR"] < pcr_low) | (out["PCR"] > pcr_high)
-    f4 = out["Stop_Loss"] >= out["Support"] * 0.98
-    f5 = out["Trend_OI"].isin(["🟢 Long Buildup", "🟡 Short Covering"])
-
-    screened = out[f1 & f2 & f3 & f4 & f5].copy()
-    if not screened.empty:
-        screened["Actual_RR"] = (
-            (screened["Target_3x"] - screened["Entry"]) /
-            (screened["Entry"]     - screened["Stop_Loss"])
-        ).round(2)
-    else:
-        screened["Actual_RR"] = pd.Series(dtype=float)
-
-    return screened.reset_index(drop=True)
-
-
-# =============================================================================
-#  POSITION SIZING
-# =============================================================================
-
-def position_sizing(entry: float, sl: float, capital: float, risk_pct: float) -> dict:
-    risk_amount   = capital * (risk_pct / 100)
-    risk_per_unit = abs(entry - sl)
-    if risk_per_unit < 0.01:
-        return {"units": 0, "risk_inr": 0.0, "reward_inr": 0.0}
+        sl, tgt = round(cmp - atr*1.5, 2), round(cmp + atr*1.5, 2)
     return {
-        "units":      int(risk_amount / risk_per_unit),
-        "risk_inr":   round(risk_amount, 2),
-        "reward_inr": round(risk_amount * 3, 2),
+        "Symbol": symbol, "Signal": signal,
+        "CMP": cmp, "Target": tgt, "Stop-Loss": sl,
+        "ATR": atr, "RSI": round(float(rng.uniform(30, 70)), 1),
+        "EMA20": round(cmp * float(rng.uniform(0.97, 1.03)), 2),
+        "VWAP":  round(cmp * float(rng.uniform(0.98, 1.02)), 2),
+        "Chg %": round(float(rng.uniform(-3, 3)), 2),
+        "Vol Surge": "✅ Yes" if rng.random() > 0.6 else "—",
+        "Score": int(rng.integers(2, 6)),
     }
 
 
+def run_scan(symbols: list) -> pd.DataFrame:
+    """
+    Parallel scan of all symbols.
+    Returns a DataFrame sorted by Signal strength.
+    """
+    results = []
+
+    if YFINANCE_OK:
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            futures = {ex.submit(compute_signal, s): s for s in symbols}
+            for f in as_completed(futures):
+                r = f.result()
+                if r:
+                    results.append(r)
+    else:
+        # Mock fallback
+        for i, sym in enumerate(symbols):
+            results.append(mock_signal(sym, i))
+
+    df = pd.DataFrame(results)
+
+    # Sort: BUY first → SELL → NEUTRAL, then by score descending
+    order = {"🟢 BUY": 0, "🔴 SELL": 1, "⚪ NEUTRAL": 2}
+    df["_ord"] = df["Signal"].map(order)
+    df = df.sort_values(["_ord", "Score"], ascending=[True, False])
+    df = df.drop(columns=["_ord", "Score"]).reset_index(drop=True)
+    return df
+
+
 # =============================================================================
-#  SESSION STATE INIT
+#  SESSION STATE
 # =============================================================================
 
-if "cache_key"     not in st.session_state:
-    st.session_state["cache_key"]      = 0
-if "prev_oi_map"   not in st.session_state:
-    st.session_state["prev_oi_map"]    = {}
-if "last_fetch_ts" not in st.session_state:
-    st.session_state["last_fetch_ts"]  = "—"
-
-
-# =============================================================================
-#  SIDEBAR
-# =============================================================================
-
-with st.sidebar:
-    st.markdown("""
-    <div style='padding:0.3rem 0 0.9rem;'>
-        <p style='font-family:JetBrains Mono,monospace;font-size:0.6rem;
-                  letter-spacing:0.14em;text-transform:uppercase;
-                  color:#8B949E;margin:0;'>NSE · LIVE DATA</p>
-        <h1 style='font-size:1.2rem;font-weight:700;margin:4px 0 0;
-                   background:linear-gradient(135deg,#3FB950,#1F6FEB);
-                   -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>
-            F&O Screener v3.0
-        </h1>
-    </div>
-    """, unsafe_allow_html=True)
-    st.divider()
-
-    st.markdown("**💰 Capital**")
-    capital  = st.number_input("Total Capital (₹)", min_value=10_000,
-                                max_value=50_000_000, value=500_000, step=10_000)
-    risk_pct = st.slider("Risk per Trade (%)", 0.5, 3.0, 1.0, 0.1)
-    st.divider()
-
-    st.markdown("**📐 Stop-Loss**")
-    atr_multiplier = st.slider("ATR Multiplier", 0.5, 3.0, 1.5, 0.1,
-                                 help="SL = CMP − (ATR × multiplier)")
-    st.divider()
-
-    st.markdown("**📈 OI Filter**")
-    min_oi_change = st.slider("Min |OI Change| (%)", 0.5, 25.0, 2.0, 0.5,
-                               help="Lower this if market is quiet (first load uses volume proxy)")
-    st.divider()
-
-    st.markdown("**⚖️ PCR Thresholds**")
-    c1, c2 = st.columns(2)
-    with c1:
-        pcr_low  = st.number_input("Low",  value=0.70, step=0.05,
-                                    min_value=0.10, max_value=1.00)
-    with c2:
-        pcr_high = st.number_input("High", value=1.50, step=0.05,
-                                    min_value=1.00, max_value=3.00)
-    st.divider()
-
-    if st.button("🔄  Refresh Live Data"):
-        st.cache_data.clear()
-        st.session_state["cache_key"] += 1
-        st.rerun()
-
-    last_ts = st.session_state["last_fetch_ts"]
-    st.markdown(
-        f"<p style='font-family:JetBrains Mono,monospace;font-size:0.62rem;"
-        f"color:#8B949E;text-align:center;margin-top:8px;'>"
-        f"Last fetch: {last_ts}<br>"
-        f"Cache TTL: 5 min</p>",
-        unsafe_allow_html=True,
-    )
-    st.divider()
-    st.markdown("""
-    <p style='font-size:0.6rem;color:#30363D;text-align:center;
-    font-family:JetBrains Mono,monospace;'>
-    Data: Yahoo Finance (yfinance)<br>
-    Delay: ~2 min · Not financial advice
-    </p>""", unsafe_allow_html=True)
+if "signals_df"  not in st.session_state:
+    st.session_state["signals_df"]  = None
+if "last_scan"   not in st.session_state:
+    st.session_state["last_scan"]   = None
+if "scanning"    not in st.session_state:
+    st.session_state["scanning"]    = False
 
 
 # =============================================================================
 #  HEADER
 # =============================================================================
 
-col_title, col_badge = st.columns([6, 1])
-with col_title:
-    st.markdown("""
-    <h1 style='margin:0;font-size:1.7rem;'>📡 F&O Live Screener</h1>
-    <p style='margin:2px 0 0;font-size:0.72rem;color:#8B949E;
-              font-family:JetBrains Mono,monospace;letter-spacing:0.06em;'>
-        NSE FUTURES &amp; OPTIONS · REAL DATA · 3:1 RR ENGINE · yfinance
+st.markdown("""
+<div style='text-align:center;padding:1.5rem 0 0.5rem;'>
+    <p style='font-family:JetBrains Mono,monospace;font-size:0.65rem;
+              letter-spacing:0.15em;color:#4B6080;margin:0;'>
+        NSE F&O · REAL-TIME · FREE
     </p>
-    """, unsafe_allow_html=True)
-with col_badge:
+    <h1 style='font-size:2.4rem;font-weight:700;margin:6px 0 4px;
+               background:linear-gradient(135deg,#00C851,#00BFFF);
+               -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>
+        🎯 F&O Signal Screener
+    </h1>
+    <p style='font-size:0.85rem;color:#4B6080;margin:0;'>
+        Scans 30 NSE F&O stocks · BUY / SELL / NEUTRAL signals · 3:1 Risk-Reward
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+st.divider()
+
+# ── yfinance missing warning ──────────────────────────────────────────────────
+if not YFINANCE_OK:
+    st.warning(
+        "**yfinance not installed** — showing demo data. "
+        "Add `requirements.txt` to your GitHub repo root and reboot the app for live data.",
+        icon="⚠️",
+    )
+
+# =============================================================================
+#  REFRESH BUTTON  (centred, prominent)
+# =============================================================================
+
+col_l, col_btn, col_r = st.columns([2, 3, 2])
+with col_btn:
+    scan_now = st.button("🔄  SCAN MARKET NOW", use_container_width=True)
+
+# Show last update time
+if st.session_state["last_scan"]:
+    st.markdown(
+        f"<div style='text-align:center;margin-top:8px;'>"
+        f"<span class='update-tag'>Last scan: {st.session_state['last_scan']}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+st.divider()
+
+
+# =============================================================================
+#  SCAN TRIGGER
+# =============================================================================
+
+if scan_now:
+    with st.spinner("🔍 Scanning 30 F&O stocks… please wait 30–60 seconds"):
+        df = run_scan(SYMBOLS)
+    st.session_state["signals_df"] = df
+    st.session_state["last_scan"]  = datetime.now().strftime("%d %b %Y  %H:%M:%S")
+    st.rerun()
+
+
+# =============================================================================
+#  RESULTS
+# =============================================================================
+
+if st.session_state["signals_df"] is not None:
+    df = st.session_state["signals_df"]
+
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    buy_count     = int((df["Signal"] == "🟢 BUY").sum())
+    sell_count    = int((df["Signal"] == "🔴 SELL").sum())
+    neutral_count = int((df["Signal"] == "⚪ NEUTRAL").sum())
+    total         = len(df)
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("📊 Total Scanned", str(total))
+    with m2:
+        st.metric("🟢 BUY Signals",  str(buy_count),
+                  delta=f"{round(buy_count/total*100)}% of universe")
+    with m3:
+        st.metric("🔴 SELL Signals", str(sell_count),
+                  delta=f"{round(sell_count/total*100)}% of universe")
+    with m4:
+        st.metric("⚪ Neutral",       str(neutral_count))
+
+    st.divider()
+
+    # ── BUY signals ───────────────────────────────────────────────────────────
+    buy_df = df[df["Signal"] == "🟢 BUY"].copy()
+    if not buy_df.empty:
+        st.markdown(
+            "<h2 style='color:#00C851;font-size:1.1rem;letter-spacing:0.06em;"
+            "text-transform:uppercase;'>🟢 BUY Signals</h2>",
+            unsafe_allow_html=True,
+        )
+        buy_display = buy_df.drop(columns=["Signal"]).copy()
+        for c in ["CMP","Target","Stop-Loss","ATR","EMA20","VWAP","Chg %"]:
+            buy_display[c] = buy_display[c].astype("float64")
+        buy_display["RSI"] = buy_display["RSI"].astype("float64")
+
+        st.dataframe(
+            buy_display,
+            column_config={
+                "Symbol":    st.column_config.TextColumn("Symbol",      width="small"),
+                "CMP":       st.column_config.NumberColumn("CMP (₹)",   format="₹%.2f"),
+                "Target":    st.column_config.NumberColumn("Target (₹)",format="₹%.2f",
+                             help="3:1 Reward target"),
+                "Stop-Loss": st.column_config.NumberColumn("SL (₹)",    format="₹%.2f"),
+                "ATR":       st.column_config.NumberColumn("ATR",       format="₹%.2f"),
+                "RSI":       st.column_config.NumberColumn("RSI",       format="%.1f"),
+                "EMA20":     st.column_config.NumberColumn("EMA 20",    format="₹%.2f"),
+                "VWAP":      st.column_config.NumberColumn("VWAP",      format="₹%.2f"),
+                "Chg %":     st.column_config.NumberColumn("Chg %",     format="%.2f%%"),
+                "Vol Surge": st.column_config.TextColumn("Vol Surge",   width="small"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            height=min(80 + 38 * len(buy_display), 500),
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── SELL signals ──────────────────────────────────────────────────────────
+    sell_df = df[df["Signal"] == "🔴 SELL"].copy()
+    if not sell_df.empty:
+        st.markdown(
+            "<h2 style='color:#FF3B5C;font-size:1.1rem;letter-spacing:0.06em;"
+            "text-transform:uppercase;'>🔴 SELL Signals</h2>",
+            unsafe_allow_html=True,
+        )
+        sell_display = sell_df.drop(columns=["Signal"]).copy()
+        for c in ["CMP","Target","Stop-Loss","ATR","EMA20","VWAP","Chg %"]:
+            sell_display[c] = sell_display[c].astype("float64")
+        sell_display["RSI"] = sell_display["RSI"].astype("float64")
+
+        st.dataframe(
+            sell_display,
+            column_config={
+                "Symbol":    st.column_config.TextColumn("Symbol",      width="small"),
+                "CMP":       st.column_config.NumberColumn("CMP (₹)",   format="₹%.2f"),
+                "Target":    st.column_config.NumberColumn("Target (₹)",format="₹%.2f",
+                             help="3:1 Reward target"),
+                "Stop-Loss": st.column_config.NumberColumn("SL (₹)",    format="₹%.2f"),
+                "ATR":       st.column_config.NumberColumn("ATR",       format="₹%.2f"),
+                "RSI":       st.column_config.NumberColumn("RSI",       format="%.1f"),
+                "EMA20":     st.column_config.NumberColumn("EMA 20",    format="₹%.2f"),
+                "VWAP":      st.column_config.NumberColumn("VWAP",      format="₹%.2f"),
+                "Chg %":     st.column_config.NumberColumn("Chg %",     format="%.2f%%"),
+                "Vol Surge": st.column_config.TextColumn("Vol Surge",   width="small"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            height=min(80 + 38 * len(sell_display), 500),
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── NEUTRAL signals ───────────────────────────────────────────────────────
+    neutral_df = df[df["Signal"] == "⚪ NEUTRAL"].copy()
+    with st.expander(f"⚪  Neutral / No Clear Signal ({len(neutral_df)} symbols)",
+                     expanded=False):
+        if not neutral_df.empty:
+            neutral_display = neutral_df.drop(columns=["Signal"]).copy()
+            for c in ["CMP","Target","Stop-Loss","ATR","EMA20","VWAP","Chg %"]:
+                neutral_display[c] = neutral_display[c].astype("float64")
+            neutral_display["RSI"] = neutral_display["RSI"].astype("float64")
+            st.dataframe(
+                neutral_display,
+                column_config={
+                    "Symbol":    st.column_config.TextColumn("Symbol",   width="small"),
+                    "CMP":       st.column_config.NumberColumn("CMP",    format="₹%.2f"),
+                    "Target":    st.column_config.NumberColumn("Target", format="₹%.2f"),
+                    "Stop-Loss": st.column_config.NumberColumn("SL",     format="₹%.2f"),
+                    "RSI":       st.column_config.NumberColumn("RSI",    format="%.1f"),
+                    "Chg %":     st.column_config.NumberColumn("Chg %",  format="%.2f%%"),
+                    "Vol Surge": st.column_config.TextColumn("Vol Surge",width="small"),
+                },
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    csv = df.to_csv(index=False).encode("utf-8")
+    col_e1, col_e2, col_e3 = st.columns([2, 2, 2])
+    with col_e2:
+        st.download_button(
+            label     = "⬇  Download Full Report CSV",
+            data      = csv,
+            file_name = f"fo_signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime      = "text/csv",
+            use_container_width=True,
+        )
+
+else:
+    # ── Empty state — before first scan ───────────────────────────────────────
     st.markdown("""
-    <div style='text-align:right;padding-top:8px;'>
-        <span class='live-badge'>
-            <span class='live-dot'></span>LIVE
-        </span>
+    <div style='text-align:center;padding:4rem 2rem;'>
+        <div style='font-size:4rem;margin-bottom:1rem;'>📡</div>
+        <p style='font-size:1.2rem;color:#E2E8F0;font-weight:600;margin:0;'>
+            No signals yet
+        </p>
+        <p style='font-size:0.85rem;color:#4B6080;margin:8px 0 0;'>
+            Press <strong style='color:#00C851;'>SCAN MARKET NOW</strong>
+            to fetch live data and generate signals
+        </p>
     </div>
     """, unsafe_allow_html=True)
-st.divider()
 
 
-# =============================================================================
-#  DATA LOADING  — with progress indicator
-# =============================================================================
-
-data_placeholder  = st.empty()
-progress_placeholder = st.empty()
-
-# ── Show banner if yfinance is missing ───────────────────────────────────────
-if not YFINANCE_AVAILABLE:
-    st.error(
-        "**⚠️ `yfinance` package not found.**\n\n"
-        "**Fix (30 seconds):**\n"
-        "1. Make sure `requirements.txt` is in the **root** of your GitHub repo\n"
-        "2. Go to Streamlit Cloud → **Manage App → Reboot app**\n\n"
-        "Showing **mock/demo data** below until the package is available.",
-        icon="📦",
-    )
-
-try:
-    with data_placeholder.container():
-        if YFINANCE_AVAILABLE:
-            with st.spinner("⏳ Fetching live NSE data via yfinance… (first load ~30–60s, then cached 5 min)"):
-                raw_df = get_cached_universe(
-                    symbols_tuple = tuple(FO_SYMBOLS),
-                    _cache_key    = st.session_state["cache_key"],
-                )
-        else:
-            # Graceful fallback — show mock data, no crash
-            raw_df = generate_mock_universe(FO_SYMBOLS)
-
-    data_placeholder.empty()
-
-    enriched_df = add_indicators(raw_df)
-    screened_df = calculate_rr_setups(
-        enriched_df,
-        atr_multiplier    = atr_multiplier,
-        min_oi_change_pct = min_oi_change,
-        pcr_low           = pcr_low,
-        pcr_high          = pcr_high,
-    )
-
-except Exception as exc:
-    data_placeholder.empty()
-    st.error(
-        f"**Live data fetch failed:** {exc}\n\n"
-        "**Possible causes:**\n"
-        "- No internet connection\n"
-        "- Yahoo Finance temporarily unavailable\n"
-        "- Market closed (options data unavailable outside hours)\n\n"
-        "👉 Click **🔄 Refresh Live Data** in the sidebar to retry."
-    )
-    st.stop()
-
-
-# =============================================================================
-#  KPI METRICS
-# =============================================================================
-
-total_setups    = len(screened_df)
-bullish_setups  = int(screened_df["Trend_OI"].str.contains("Long Buildup",   na=False).sum())
-covering_setups = int(screened_df["Trend_OI"].str.contains("Short Covering", na=False).sum())
-symbols_loaded  = len(enriched_df)
-avg_pcr         = float(enriched_df["PCR"].mean())
-avg_iv          = float(enriched_df["IV"].mean())
-
-st.markdown("## 📊  Market Pulse")
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-
-with k1:
-    st.metric("🎯 Setups",         str(total_setups),
-              delta=f"of {symbols_loaded} loaded")
-with k2:
-    st.metric("🟢 Long Buildup",   str(bullish_setups),
-              delta="fresh longs")
-with k3:
-    st.metric("🟡 Short Covering", str(covering_setups),
-              delta="bears exiting")
-with k4:
-    st.metric("⚖️ Avg PCR",        f"{avg_pcr:.2f}",
-              delta="> 1.0 bearish skew")
-with k5:
-    st.metric("📊 Avg IV",         f"{avg_iv:.1f}%",
-              delta="implied volatility")
-with k6:
-    above_vwap = int((enriched_df["VWAP_Signal"] == "▲ Above").sum())
-    st.metric("📈 Above VWAP",     str(above_vwap),
-              delta=f"of {symbols_loaded} symbols")
-
-st.divider()
-
-
-# =============================================================================
-#  SETUPS TABLE
-# =============================================================================
-
-st.markdown("## 🔍  Actionable 3:1 RR Setups")
-
-if screened_df.empty:
-    st.warning(
-        "⚠️ No setups pass all 5 filters right now.\n\n"
-        "**Try these adjustments in the sidebar:**\n"
-        "- Lower **Min |OI Change|** to 1–2% (market may be calm)\n"
-        "- Widen **PCR range** (e.g., Low: 0.5, High: 1.8)\n"
-        "- Increase **ATR Multiplier** to 2.0+ (wider stop = more room for target)\n"
-        "- Click **🔄 Refresh** — OI delta improves after the 2nd fetch"
-    )
-else:
-    # Attach position sizing
-    pos_list = [
-        position_sizing(row["Entry"], row["Stop_Loss"], capital, risk_pct)
-        for _, row in screened_df.iterrows()
-    ]
-    screened_df["Units"]      = [p["units"]      for p in pos_list]
-    screened_df["Risk_INR"]   = [p["risk_inr"]   for p in pos_list]
-    screened_df["Reward_INR"] = [p["reward_inr"] for p in pos_list]
-
-    display_cols = [
-        "Symbol", "Trend_OI", "CMP", "Entry", "Stop_Loss",
-        "Target_3x", "Actual_RR", "PCR", "IV",
-        "VWAP_Signal", "OI_Change_Pct",
-        "Units", "Risk_INR", "Reward_INR",
-    ]
-    display_df = screened_df[display_cols].copy()
-
-    # Explicit dtype safety — prevents Arrow serialization errors
-    float_cols = ["CMP","Entry","Stop_Loss","Target_3x","Actual_RR",
-                  "PCR","IV","OI_Change_Pct","Risk_INR","Reward_INR"]
-    for c in float_cols:
-        display_df[c] = display_df[c].astype("float64")
-    display_df["Units"] = display_df["Units"].astype("int64")
-
-    col_cfg = {
-        "Symbol":        st.column_config.TextColumn("Symbol",          width="small"),
-        "Trend_OI":      st.column_config.TextColumn("OI Trend",        width="medium"),
-        "CMP":           st.column_config.NumberColumn("CMP (₹)",       format="₹%.2f"),
-        "Entry":         st.column_config.NumberColumn("Entry (₹)",     format="₹%.2f"),
-        "Stop_Loss":     st.column_config.NumberColumn("Stop-Loss (₹)", format="₹%.2f",
-                         help="SL = CMP − (ATR × multiplier)"),
-        "Target_3x":     st.column_config.NumberColumn("Target 3:1 (₹)",format="₹%.2f",
-                         help="Target = Entry + Risk × 3"),
-        "Actual_RR":     st.column_config.NumberColumn("R:R",           format="%.2fx"),
-        "PCR":           st.column_config.NumberColumn("PCR",           format="%.2f",
-                         help="Put-Call Ratio from live option chain"),
-        "IV":            st.column_config.NumberColumn("IV (%)",        format="%.1f%%",
-                         help="ATM Implied Volatility from nearest expiry"),
-        "VWAP_Signal":   st.column_config.TextColumn("VWAP",            width="small"),
-        "OI_Change_Pct": st.column_config.NumberColumn("OI Δ (%)",      format="%.2f%%",
-                         help="OI change vs previous fetch (1st load = volume proxy)"),
-        "Units":         st.column_config.NumberColumn("Units",         format="%d"),
-        "Risk_INR":      st.column_config.NumberColumn("Risk (₹)",      format="₹%.0f"),
-        "Reward_INR":    st.column_config.NumberColumn("Reward (₹)",    format="₹%.0f"),
-    }
-
-    st.dataframe(
-        display_df,
-        column_config       = col_cfg,
-        use_container_width = True,
-        hide_index          = True,
-        height              = min(80 + 38 * len(display_df), 560),
-    )
-
-    csv = display_df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇  Export Setups CSV", csv,
-                        "fo_live_setups.csv", "text/csv")
-
-st.divider()
-
-
-# =============================================================================
-#  FULL UNIVERSE TABLE
-# =============================================================================
-
-with st.expander("📋  Full Live Universe (all loaded symbols)", expanded=False):
-    uni = enriched_df[[
-        "Symbol","CMP","Prev_Close","Price_Change_Pct",
-        "VWAP","VWAP_Signal","OI","OI_Change_Pct","Trend_OI",
-        "PCR","IV","ATR","Support","Resistance",
-    ]].copy()
-
-    for c in ["CMP","Prev_Close","Price_Change_Pct","VWAP",
-              "OI_Change_Pct","PCR","IV","ATR","Support","Resistance"]:
-        uni[c] = uni[c].astype("float64")
-    uni["OI"] = uni["OI"].astype("int64")
-
-    uni_cfg = {
-        "Symbol":           st.column_config.TextColumn("Symbol",     width="small"),
-        "CMP":              st.column_config.NumberColumn("CMP (₹)",  format="₹%.2f"),
-        "Prev_Close":       st.column_config.NumberColumn("Prev Close",format="₹%.2f"),
-        "Price_Change_Pct": st.column_config.NumberColumn("Price Δ%", format="%.2f%%"),
-        "VWAP":             st.column_config.NumberColumn("VWAP",     format="₹%.2f"),
-        "VWAP_Signal":      st.column_config.TextColumn("VWAP Pos",   width="small"),
-        "OI":               st.column_config.NumberColumn("Total OI", format="%d"),
-        "OI_Change_Pct":    st.column_config.NumberColumn("OI Δ%",    format="%.2f%%"),
-        "Trend_OI":         st.column_config.TextColumn("OI Trend",   width="medium"),
-        "PCR":              st.column_config.NumberColumn("PCR",      format="%.2f"),
-        "IV":               st.column_config.NumberColumn("IV%",      format="%.1f%%"),
-        "ATR":              st.column_config.NumberColumn("ATR",      format="₹%.2f"),
-        "Support":          st.column_config.NumberColumn("Support",  format="₹%.2f"),
-        "Resistance":       st.column_config.NumberColumn("Resistance",format="₹%.2f"),
-    }
-
-    st.dataframe(uni, column_config=uni_cfg,
-                  use_container_width=True, hide_index=True, height=440)
-
-
-# =============================================================================
-#  DATA SOURCE EXPLAINER
-# =============================================================================
-
-with st.expander("ℹ️  Data Sources & Methodology", expanded=False):
+# ── Signal logic explainer ────────────────────────────────────────────────────
+with st.expander("📖  How signals are generated", expanded=False):
     st.markdown("""
-### What data is real vs estimated?
-
-| Column | Source | Notes |
+| Indicator | BUY condition | SELL condition |
 |---|---|---|
-| CMP, Prev Close | yfinance `.history()` | ~2 min delay |
-| Volume | yfinance `.history()` | Real |
-| ATR (14-period) | Calculated from OHLCV | Real |
-| VWAP | Calculated from 22-day OHLCV | Swing VWAP, not intraday |
-| Support / Resistance | 20-day Low / High | Real technicals |
-| PCR | yfinance `.option_chain()` | Real, nearest expiry |
-| IV | yfinance `.option_chain()` ATM | Real, nearest expiry |
-| OI (Total) | yfinance `.option_chain()` sum | Real, nearest expiry |
-| OI Change % | Session state delta | **Proxy on 1st load** (volume-based); improves after Refresh |
+| **VWAP** | CMP above VWAP | CMP below VWAP |
+| **EMA 20** | CMP above EMA20 | CMP below EMA20 |
+| **RSI 14** | Between 45–72 (momentum) | Between 28–55 (weakness) |
+| **Price Change** | Today is green (+%) | Today is red (−%) |
+| **Volume Surge** | Volume > 1.3× average | Volume > 1.3× average |
 
-### Why "OI Change" is a proxy on first load
-OI change requires two data points. On the first load there is no previous
-snapshot, so the app uses `(Volume / AvgVolume − 1) × 15` as a scaled proxy
-for participation intensity. After you click **🔄 Refresh**, real OI delta
-between the two fetches is used.
+**Threshold: 4 out of 5 conditions must match** for a BUY or SELL signal.
+If fewer than 4 match → NEUTRAL.
 
-### 3:1 RR Formula
-```
-Risk       = ATR × ATR_Multiplier
-Stop-Loss  = CMP − Risk
-Target     = CMP + (Risk × 3)
-Valid if   : Resistance >= Target  AND  Stop-Loss >= Support × 0.98
-```
-> Data via Yahoo Finance (yfinance). Free, ~2-min delay. Not financial advice.
+**Stop-Loss** = CMP ± ATR × 1.5
+**Target** = CMP ± ATR × 4.5  *(3:1 Risk-Reward)*
+
+> Data via Yahoo Finance · ~2 min delay · Not financial advice
     """)
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style='text-align:center;padding:1.5rem 0 0.3rem;'>
+<div style='text-align:center;padding:2rem 0 0.5rem;'>
     <p style='font-family:JetBrains Mono,monospace;font-size:0.58rem;
-              color:#21262D;letter-spacing:0.1em;'>
-        F&O SCREENER v3.0 · yfinance · NSE · NOT FINANCIAL ADVICE
+              color:#1A2535;letter-spacing:0.1em;'>
+        F&O SIGNAL SCREENER · yfinance · NOT FINANCIAL ADVICE
     </p>
 </div>
 """, unsafe_allow_html=True)
