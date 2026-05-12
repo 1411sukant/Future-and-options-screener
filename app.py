@@ -22,11 +22,24 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import warnings
 import time
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+# ── Auto-install yfinance if missing (Streamlit Cloud safety net) ────────────
+# Handles the case where requirements.txt was not committed to the repo.
+try:
+    import yfinance as yf
+except ModuleNotFoundError:
+    st.info("⚙️ Installing yfinance for the first time — please wait ~15 seconds…")
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "yfinance>=0.2.40", "-q"]
+    )
+    import yfinance as yf
+    st.rerun()   # restart so all imports are clean
 
 warnings.filterwarnings("ignore")
 
