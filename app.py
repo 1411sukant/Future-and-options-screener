@@ -727,7 +727,7 @@ tab1,tab2,tab3,tab4,tab5=st.tabs([
 
 SIG_COLORS={"STRONG BUY":"🚀","BUY":"🟢","HOLD":"🟡","SELL":"🔴","STRONG SELL":"⛔"}
 
-def make_table(data, show_options=False):
+def make_table(data, show_options=False, table_key='default'):
     if not data:
         st.info("No stocks match the current filter."); return
     rows=[]
@@ -777,20 +777,20 @@ def make_table(data, show_options=False):
     st.dataframe(df,column_config=cfg,use_container_width=True,
                   hide_index=True,height=min(80+38*len(df),700))
     csv=df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇ Export CSV",csv,"fo_signals.csv","text/csv")
+    st.download_button("⬇ Export CSV",csv,"fo_signals.csv","text/csv", key=f"dl_{table_key}")
 
 with tab1:
-    make_table(fs)
+    make_table(fs, table_key="all")
 
 with tab2:
     buy_stocks=[x for x in fs if x["signal"] in ("STRONG BUY","BUY")]
     st.markdown(f"<div style='font-size:.62rem;color:#4CAF50;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px;'>🟢 {len(buy_stocks)} BUY signals found</div>",unsafe_allow_html=True)
-    make_table(buy_stocks)
+    make_table(buy_stocks, table_key="buy")
 
 with tab3:
     sell_stocks=[x for x in fs if x["signal"] in ("STRONG SELL","SELL")]
     st.markdown(f"<div style='font-size:.62rem;color:#F44336;font-weight:700;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px;'>🔴 {len(sell_stocks)} SELL signals found</div>",unsafe_allow_html=True)
-    make_table(sell_stocks)
+    make_table(sell_stocks, table_key="sell")
 
 with tab4:
     opt_stocks=[x for x in fs if x["signal"] in ("STRONG BUY","BUY","STRONG SELL","SELL")]
@@ -800,7 +800,7 @@ with tab4:
     📉 <b style='color:#F8FAFC;'>BUY PUT (PE)</b> — for SELL/STRONG SELL signals (bearish view)<br>
     <span style='color:#64748B;font-size:.65rem;'>Premium Target = 1.8× Entry · SL = 0.5× Entry · Strikes are ATM nearest expiry</span>
     </div></div>""",unsafe_allow_html=True)
-    make_table(opt_stocks, show_options=True)
+    make_table(opt_stocks, show_options=True, table_key="opts")
 
 with tab5:
     for sector, stocks in SECTOR_MAP.items():
@@ -810,7 +810,7 @@ with tab5:
         sells=sum(1 for x in sector_data if x["signal"] in ("STRONG SELL","SELL"))
         mood="🟢 Bullish" if buys>sells else "🔴 Bearish" if sells>buys else "🟡 Mixed"
         with st.expander(f"🏭 {sector}  ·  {len(sector_data)} stocks  ·  {mood}  ({buys} Buy / {sells} Sell)",expanded=False):
-            make_table(sector_data)
+            make_table(sector_data, table_key=f"sector_{sector}")
 
 st.divider()
 st.markdown("""<div style='text-align:center;padding:1rem 0 .3rem;'>
